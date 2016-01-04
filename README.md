@@ -1,3 +1,3 @@
 # dicom-parse
 
-add description of dicom-parse here
+Experimental project for parsing binary data
