@@ -1,20 +1,28 @@
 {-# LANGUAGE OverloadedStrings #-}
+-----------------------------------------------------------------------------
+-- |
+-- Module      :  Data.DICOM.Parse
+-- Copyright   :  (C) 2016 Dan Plubell
+-- License     :  BSD-style (see the file LICENSE)
+-- Maintainer  :  Dan Plubell <danplubell@gmail.com>
+-- Stability   :  experimental
+-- Portability :  non-portable
+--
+----------------------------------------------------------------------------
 module Data.DICOM.Parse where
 
 import           Data.Binary
 import           Data.Binary.Get
-import qualified Data.ByteString                as BS
-import qualified Data.ByteString.Lazy           as BL
+import qualified Data.ByteString       as BS
+import qualified Data.ByteString.Lazy  as BL
 import           Data.DICOM.Dictionary
-import           Data.DICOM.Model.DataElement
-import           Data.DICOM.Model.Dictionary
-import           Data.DICOM.Model.Parser
-import           Data.DICOM.Model.RegisteredUID
+import           Data.DICOM.Model
 
-
+-- | Parse binary content into a list of dicom data elements
 parseDicomContent :: DicomDictionary -> UIDDictionary -> BL.ByteString -> [DataElement]
 parseDicomContent dicomdict uiddict = runGet (makeSoup dicomdict uiddict)
 
+-- | Parser for making the dicom tag soup
 makeSoup:: DicomDictionary -> UIDDictionary -> Get [DataElement]
 makeSoup dicomdict uiddict = do
   header <- deserializeHeader dicomdict
@@ -22,7 +30,7 @@ makeSoup dicomdict uiddict = do
   let ts = getTransferSyntax uiddict header
   decodeElements dicomdict ts
 
-
+-- | Get the transfer syntax information from the dicom file meta information
 getTransferSyntax::UIDDictionary -> FileMetaInformation -> TransferSyntax
 getTransferSyntax uiddict fmi  =
   let tsUID = lookupUIDType uiddict ((deRawValue.transferSyntaxUID) fmi)  -- this is the DicomUID of the transfer syntax
@@ -34,6 +42,7 @@ getTransferSyntax uiddict fmi  =
           _                              -> TransferSyntax LittleEndian Explicit tsUID
 
 
+-- | Parse the dicom file header into the meta information structure
 deserializeHeader:: DicomDictionary -> Get FileMetaInformation
 deserializeHeader dd = do
   let ts = TransferSyntax LittleEndian Explicit ExplicitVRLittleEndian
@@ -55,6 +64,7 @@ deserializeHeader dd = do
                                implementVersion sourceAE sendingAE receivingAE privateInfoCreator privInfo
 
 
+-- | Decode a single element
 decodeElement :: DicomDictionary  -> TransferSyntax -> Get DataElement
 decodeElement dd ts  = do
   let fword16 = case tsEndianType ts of
@@ -92,34 +102,15 @@ decodeElement dd ts  = do
                            else getByteString (fromIntegral vlv)
                    return $! Element tagv vrv vlv rw
 
+-- | Lookup the VR by the element tag.  An error is thrown if the tag is not found in the dictionary
 lookupVRByTag:: DicomDictionary->(Word16,Word16) -> Get BS.ByteString
 lookupVRByTag dict tagv = do
   let e = lookupElementByTag dict tagv
   case e of
      Nothing -> error $  "The tag was not found in the dictionary: " ++ show tagv
      Just elem' -> return $ vr elem'
-{-
-decodeElement'::Get DataElement
-decodeElement'= do
-  tagv <- getTag
-  if fst tagv == 0xFFFE
-   then decodeItem tagv
-   else do
 
-       vrv       <- getByteString 2
-       vlv <- if vrv `elem` ["OW","OB","OF","OD","SQ","UC","UR","UT","UN"]
-                then do
-                     _ <- getWord16le
-                     getWord32le
-                else do
-                     l <- getWord16le
-                     return (fromIntegral l)
-
-       rw <- if vlv == 0 || vlv == 0xFFFFFFFF || vrv == "SQ"
-               then return BS.empty
-               else getByteString (fromIntegral vlv)
-       return $! DataElement tagv vrv vlv rw
--}
+-- | Decode an item in a nested element
 decodeItem :: Get Word32->(Word16,Word16)-> Get DataElement
 decodeItem fendian tagv = do
 
@@ -130,12 +121,14 @@ decodeItem fendian tagv = do
 
   return $ Item tagv  vlv rw
 
+-- | The tag tuple parser
 getTag :: Get Word16 -> Get (Word16,Word16)
 getTag f = do
     grpNbr <- f
     elemNbr <- f
     return (grpNbr,elemNbr)
 
+-- | Parser for decoding elements
 decodeElements::DicomDictionary -> TransferSyntax -> Get [DataElement]
 decodeElements dict ts = do
   empty <- isEmpty
