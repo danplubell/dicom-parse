@@ -57,18 +57,17 @@ getTransferSyntax uiddict header  =
           _                              -> TransferSyntax LittleEndian Explicit tsUID
     where filterby e  = deTag e  == (0x0002,0x0010)
 
-deserializeHeader::DicomDictionary -> Get ([DataElement],Int64)
-deserializeHeader dd = do
-  let ts = TransferSyntax LittleEndian Explicit ExplicitVRLittleEndian
+deserializeHeader:: Get ([DataElement],Int64)
+deserializeHeader  = do
   _                     <- getByteString 128 -- preamble
   dicm                  <- getByteString 4   -- 'DICM'
   case dicm of
     "DICM" -> do
-             metaLenElem           <- decodeElement dd ts
+             metaLenElem           <- decodeHeaderElement
              let len               = runGet getWord32le (BL.fromStrict $ deRawValue metaLenElem)
              headerBytes           <- getByteString (fromIntegral len)
 
-             let deList                =   metaLenElem: runGet (decodeElements dd ts) (BL.fromStrict headerBytes)
+             let deList                =   metaLenElem: runGet decodeHeaderElements (BL.fromStrict headerBytes)
              parseByteCnt          <- bytesRead
              return (deList,parseByteCnt)
     _      -> error "The data doesn't appear to be from a DICOM file"
@@ -100,8 +99,23 @@ deserializeHeader' dd = do
                                implementVersion sourceAE sendingAE receivingAE privateInfoCreator privInfo
 -}
 
--- | Decode a single element
-decodeElement :: DicomDictionary  -> TransferSyntax -> Get DataElement
+decodeHeaderElement::Get DataElement
+decodeHeaderElement = do
+  tagv <- getTag getWord16le
+  vrv  <- getByteString 2
+  vlv <- if vrv `elem` ["OW","OB","OF","OD","SQ","UC","UR","UT","UN"]
+           then do
+                _ <- getWord16le
+                getWord32le
+           else do
+                l <- getWord16le
+                return (fromIntegral l)
+  rw <- if vlv == 0 || vlv == 0xFFFFFFFF || vrv == "SQ"
+          then return BS.empty
+          else getByteString (fromIntegral vlv)
+  return $! Element tagv (toVR vrv) vlv rw
+
+decodeElement :: DicomDictionary  -> TransferSyntax -> Get [DataElement]
 decodeElement dd ts  = do
   let fword16 = case tsEndianType ts of
                      BigEndian    -> getWord16be
@@ -125,7 +139,7 @@ decodeElement dd ts  = do
                    rw  <- if vlv == 0 || vlv == 0xFFFFFFFF || vrv == "SQ"
                             then return BS.empty
                             else getByteString (fromIntegral vlv)
-                   return $! Element tagv (toVR vrv) vlv rw
+                   return  [Element tagv (toVR vrv) vlv rw]
 
         Explicit -> do
                    vrv       <- getByteString 2
@@ -139,7 +153,7 @@ decodeElement dd ts  = do
                    rw <- if vlv == 0 || vlv == 0xFFFFFFFF || vrv == "SQ" || vrv == "OB"
                            then return BS.empty
                            else getByteString (fromIntegral vlv)
-                   return $! Element tagv (toVR vrv) vlv rw
+                   return  [Element tagv (toVR vrv) vlv rw]
 
 -- | Lookup the VR by the element tag.  An error is thrown if the tag is not found in the dictionary
 lookupVRByTag:: DicomDictionary->(Word16,Word16) -> Get BS.ByteString
@@ -150,7 +164,7 @@ lookupVRByTag dict tagv = do
      Just elem' -> return $ vr elem'
 
 -- | Decode an item in a nested element
-decodeItem :: Get Word32->(Word16,Word16)-> Get DataElement
+decodeItem :: Get Word32->(Word16,Word16)-> Get [DataElement]
 decodeItem fendian tagv = do
   traceM $ "item tag: " ++ show tagv
   vlv  <- fendian
@@ -158,7 +172,7 @@ decodeItem fendian tagv = do
 --           then return BS.empty
 --           else getByteString (fromIntegral vlv)
 
-  return $ Item tagv  vlv BS.empty --rw
+  return  [Item tagv  vlv BS.empty] --rw
 
 -- | The tag tuple parser
 getTag :: Get Word16 -> Get (Word16,Word16)
@@ -169,8 +183,13 @@ getTag f = do
 
 
 decodeElements::DicomDictionary -> TransferSyntax -> Get [DataElement]
-decodeElements dict ts = untilM  (decodeElement dict ts) isEmpty
+decodeElements dict ts = do elementLists <- untilM  (decodeElement dict ts) isEmpty
+                            return $ concat elementLists
 
+decodeHeaderElements ::Get [DataElement]
+decodeHeaderElements = untilM decodeHeaderElement isEmpty
+
+{-
 -- | Parser for decoding elements
 decodeElements'::DicomDictionary -> TransferSyntax -> Get [DataElement]
 decodeElements' dict ts = do
@@ -181,7 +200,7 @@ decodeElements' dict ts = do
              elements <- decodeElements dict ts
              return (element:elements)
 
-
+-}
 getDicomValue::TransferSyntax -> DataElement -> DicomValue a
 getDicomValue ts d =
   let fword32  =
