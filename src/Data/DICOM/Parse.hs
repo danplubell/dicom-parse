@@ -31,7 +31,7 @@ defaultTransferSyntax= TransferSyntax LittleEndian Explicit ExplicitVRLittleEndi
 parseDicomFileContent::BL.ByteString -> [DataElement]
 parseDicomFileContent bs = let dd             =  loadElementDictionary
                                uidd           =  loadUIDDictionary
-                               headerElements = parseDicomFileHeader dd bs
+                               headerElements = parseDicomFileHeader  bs
                                ts             = getTransferSyntax uidd (fst headerElements)
                            in fst headerElements `mappend` parseDicomContent dd ts (BL.drop (fromIntegral (snd headerElements)) bs)
 
@@ -39,8 +39,8 @@ parseDicomFileContent bs = let dd             =  loadElementDictionary
 parseDicomContent :: DicomDictionary   -> TransferSyntax -> BL.ByteString -> [DataElement]
 parseDicomContent dicomdict ts = runGet (decodeElements dicomdict  ts)
 
-parseDicomFileHeader :: DicomDictionary  -> BL.ByteString -> ([DataElement],Int64)
-parseDicomFileHeader dd  = runGet (deserializeHeader dd)
+parseDicomFileHeader ::  BL.ByteString -> ([DataElement],Int64)
+parseDicomFileHeader   = runGet deserializeHeader
 
 -- | Get the transfer syntax information from the dicom file meta information
 getTransferSyntax::UIDDictionary -> [DataElement] -> TransferSyntax
