@@ -11,6 +11,7 @@
 ----------------------------------------------------------------------------
 module Data.DICOM.Parse where
 
+import           Control.Monad.Loops
 import           Data.Binary
 import           Data.Binary.Get
 import qualified Data.ByteString       as BS
@@ -18,10 +19,11 @@ import qualified Data.ByteString.Lazy  as BL
 import           Data.Char
 import           Data.DICOM.Dictionary
 import           Data.DICOM.Model
+import           Data.Int
 import qualified Data.Text             as T
 import qualified Data.Text.Encoding    as E
 import           Debug.Trace
-
+import           Numeric
 defaultTransferSyntax::TransferSyntax
 defaultTransferSyntax= TransferSyntax LittleEndian Explicit ExplicitVRLittleEndian
 -- | Parse dicom data that is from a dicom file; including preamble, dicm file indicator, and file header meta information
@@ -30,14 +32,14 @@ parseDicomFileContent::BL.ByteString -> [DataElement]
 parseDicomFileContent bs = let dd             =  loadElementDictionary
                                uidd           =  loadUIDDictionary
                                headerElements = parseDicomFileHeader dd bs
-                               ts             = getTransferSyntax uidd headerElements
-                           in headerElements `mappend` parseDicomContent dd ts bs
+                               ts             = getTransferSyntax uidd (fst headerElements)
+                           in fst headerElements `mappend` parseDicomContent dd ts (BL.drop (fromIntegral (snd headerElements)) bs)
 
 -- | Parse binary  content into a list of dicom data elements
 parseDicomContent :: DicomDictionary   -> TransferSyntax -> BL.ByteString -> [DataElement]
 parseDicomContent dicomdict ts = runGet (decodeElements dicomdict  ts)
 
-parseDicomFileHeader :: DicomDictionary  -> BL.ByteString -> [DataElement]
+parseDicomFileHeader :: DicomDictionary  -> BL.ByteString -> ([DataElement],Int64)
 parseDicomFileHeader dd  = runGet (deserializeHeader dd)
 
 -- | Get the transfer syntax information from the dicom file meta information
@@ -45,6 +47,7 @@ getTransferSyntax::UIDDictionary -> [DataElement] -> TransferSyntax
 getTransferSyntax uiddict header  =
     let tsElement = head $ filter filterby  header  --TODO don't assume that there is a transfer syntax tag
         rawUID  (UIVal v) = E.encodeUtf8 v
+        rawUID  _         = BS.empty
         tsUID = lookupUIDType uiddict (rawUID $ getDicomValue defaultTransferSyntax tsElement)
     in case tsUID of
           ImplicitVRLittleEndian         -> TransferSyntax LittleEndian Implicit tsUID
@@ -54,7 +57,7 @@ getTransferSyntax uiddict header  =
           _                              -> TransferSyntax LittleEndian Explicit tsUID
     where filterby e  = deTag e  == (0x0002,0x0010)
 
-deserializeHeader::DicomDictionary -> Get [DataElement]
+deserializeHeader::DicomDictionary -> Get ([DataElement],Int64)
 deserializeHeader dd = do
   let ts = TransferSyntax LittleEndian Explicit ExplicitVRLittleEndian
   _                     <- getByteString 128 -- preamble
@@ -64,7 +67,10 @@ deserializeHeader dd = do
              metaLenElem           <- decodeElement dd ts
              let len               = runGet getWord32le (BL.fromStrict $ deRawValue metaLenElem)
              headerBytes           <- getByteString (fromIntegral len)
-             return   (metaLenElem: runGet (decodeElements dd ts) (BL.fromStrict headerBytes))
+
+             let deList                =   metaLenElem: runGet (decodeElements dd ts) (BL.fromStrict headerBytes)
+             parseByteCnt          <- bytesRead
+             return (deList,parseByteCnt)
     _      -> error "The data doesn't appear to be from a DICOM file"
 
 -- | Parse the dicom file header into the meta information structure
@@ -106,8 +112,11 @@ decodeElement dd ts  = do
                      LittleEndian -> getWord32le
 
   tagv <- getTag fword16
+  traceM $ "decodeElement tagv: " ++ showHex (fst tagv) ""  ++ " " ++ showHex (snd tagv) ""
   if fst tagv == 0xFFFE
     then decodeItem fword32 tagv
+--      vlv <- fword32
+--      return $! Item tagv vlv BS.empty
     else
       case tsVREncoding ts of
         Implicit -> do
@@ -127,7 +136,7 @@ decodeElement dd ts  = do
                             else do
                                  l <- fword16
                                  return (fromIntegral l)
-                   rw <- if vlv == 0 || vlv == 0xFFFFFFFF || vrv == "SQ"
+                   rw <- if vlv == 0 || vlv == 0xFFFFFFFF || vrv == "SQ" || vrv == "OB"
                            then return BS.empty
                            else getByteString (fromIntegral vlv)
                    return $! Element tagv (toVR vrv) vlv rw
@@ -143,13 +152,13 @@ lookupVRByTag dict tagv = do
 -- | Decode an item in a nested element
 decodeItem :: Get Word32->(Word16,Word16)-> Get DataElement
 decodeItem fendian tagv = do
-
+  traceM $ "item tag: " ++ show tagv
   vlv  <- fendian
-  rw <- if vlv == 0 || vlv == 0xFFFFFFFF
-           then return BS.empty
-           else getByteString (fromIntegral vlv)
+--  rw <- if vlv == 0 || vlv == 0xFFFFFFFF
+--           then return BS.empty
+--           else getByteString (fromIntegral vlv)
 
-  return $ Item tagv  vlv rw
+  return $ Item tagv  vlv BS.empty --rw
 
 -- | The tag tuple parser
 getTag :: Get Word16 -> Get (Word16,Word16)
@@ -158,9 +167,13 @@ getTag f = do
     elemNbr <- f
     return (grpNbr,elemNbr)
 
--- | Parser for decoding elements
+
 decodeElements::DicomDictionary -> TransferSyntax -> Get [DataElement]
-decodeElements dict ts = do
+decodeElements dict ts = untilM  (decodeElement dict ts) isEmpty
+
+-- | Parser for decoding elements
+decodeElements'::DicomDictionary -> TransferSyntax -> Get [DataElement]
+decodeElements' dict ts = do
   empty <- isEmpty
   if empty
      then return []
