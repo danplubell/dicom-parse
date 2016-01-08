@@ -24,6 +24,7 @@ import qualified Data.Text             as T
 import qualified Data.Text.Encoding    as E
 import           Debug.Trace
 import           Numeric
+
 defaultTransferSyntax::TransferSyntax
 defaultTransferSyntax= TransferSyntax LittleEndian Explicit ExplicitVRLittleEndian
 -- | Parse dicom data that is from a dicom file; including preamble, dicm file indicator, and file header meta information
@@ -49,12 +50,13 @@ getTransferSyntax uiddict header  =
         rawUID  (UIVal v) = E.encodeUtf8 v
         rawUID  _         = BS.empty
         tsUID = lookupUIDType uiddict (rawUID $ getDicomValue defaultTransferSyntax tsElement)
+
     in case tsUID of
-          ImplicitVRLittleEndian         -> TransferSyntax LittleEndian Implicit tsUID
-          ExplicitVRLittleEndian         -> TransferSyntax LittleEndian Implicit tsUID
-          DeflatedExplicitVRLittleEndian -> TransferSyntax LittleEndian Implicit tsUID
-          ExplicitVRBigEndian            -> TransferSyntax BigEndian    Explicit tsUID
-          _                              -> TransferSyntax LittleEndian Explicit tsUID
+        ImplicitVRLittleEndian         -> TransferSyntax LittleEndian Implicit tsUID
+        ExplicitVRLittleEndian         -> TransferSyntax LittleEndian Explicit tsUID
+        DeflatedExplicitVRLittleEndian -> TransferSyntax LittleEndian Explicit tsUID
+        ExplicitVRBigEndian            -> TransferSyntax BigEndian    Explicit tsUID
+        _                              -> TransferSyntax LittleEndian Explicit tsUID
     where filterby e  = deTag e  == (0x0002,0x0010)
 
 deserializeHeader:: Get ([DataElement],Int64)
@@ -72,32 +74,6 @@ deserializeHeader  = do
              return (deList,parseByteCnt)
     _      -> error "The data doesn't appear to be from a DICOM file"
 
--- | Parse the dicom file header into the meta information structure
-{-deserializeHeader':: DicomDictionary -> Get FileMetaInformation
-deserializeHeader' dd = do
-  let ts = TransferSyntax LittleEndian Explicit ExplicitVRLittleEndian
-  _                  <- getByteString 128 -- preamble
-  dicm                  <- getByteString 4   -- 'DICM'
-  traceM $ show dicm
-  metaLen            <- decodeElement dd ts
-  let len = runGet getWord32le (BL.fromStrict $ deRawValue metaLen)
-  headerBytes <- getByteString (fromIntegral len)
-  let headerDeList = runGet (decodeElements dd ts) (BL.fromStrict headerBytes)
-  traceM $ show headerDeList
-  metaVersion        <- decodeElement dd ts
-  storageSOP         <- decodeElement dd ts
-  storageSopI        <- decodeElement dd ts
-  transferSyntax     <- decodeElement dd ts
-  implementation     <- decodeElement dd ts
-  implementVersion   <- decodeElement dd ts
-  sourceAE           <- decodeElement dd ts
-  sendingAE          <- decodeElement dd ts
-  receivingAE        <- decodeElement dd ts
-  privateInfoCreator <- decodeElement dd ts
-  privInfo           <- decodeElement dd ts
-  return $ FileMetaInformation metaLen metaVersion storageSOP storageSopI transferSyntax implementation
-                               implementVersion sourceAE sendingAE receivingAE privateInfoCreator privInfo
--}
 
 decodeHeaderElement::Get DataElement
 decodeHeaderElement = do
@@ -115,45 +91,63 @@ decodeHeaderElement = do
           else getByteString (fromIntegral vlv)
   return $! Element tagv (toVR vrv) vlv rw
 
-decodeElement :: DicomDictionary  -> TransferSyntax -> Get [DataElement]
-decodeElement dd ts  = do
+decodeElement::DicomDictionary -> TransferSyntax -> Get [DataElement]
+decodeElement dd ts = do
+  traceM $ "TS: " ++ show ts
   let fword16 = case tsEndianType ts of
                      BigEndian    -> getWord16be
                      LittleEndian -> getWord16le
-
   let fword32 = case tsEndianType ts of
                      BigEndian    -> getWord32be
                      LittleEndian -> getWord32le
-
   tagv <- getTag fword16
-  traceM $ "decodeElement tagv: " ++ showHex (fst tagv) ""  ++ " " ++ showHex (snd tagv) ""
-  if fst tagv == 0xFFFE
-    then decodeItem fword32 tagv
---      vlv <- fword32
---      return $! Item tagv vlv BS.empty
-    else
-      case tsVREncoding ts of
-        Implicit -> do
-                   vlv <- fword32
-                   vrv <- lookupVRByTag dd tagv
-                   rw  <- if vlv == 0 || vlv == 0xFFFFFFFF || vrv == "SQ"
-                            then return BS.empty
-                            else getByteString (fromIntegral vlv)
-                   return  [Element tagv (toVR vrv) vlv rw]
+  traceM $ "tag: " ++ showHex (fst tagv) "" ++ " " ++ showHex (snd tagv) ""
+  case fst tagv   of
+     0xFFFE -> decodeItem fword32 tagv -- decode item
+     _      -> case tsVREncoding ts of
+              Implicit -> do
+                         vlv <- fword32
+                         vrv <- lookupVRByTag dd tagv
+                         traceM $ "vr: " ++ show vrv ++  " len: " ++ show vlv
+                         rw  <- if vlv == 0 || vlv == 0xFFFFFFFF || vrv == "SQ"
+                                  then return BS.empty
+                                  else getByteString (fromIntegral vlv)
+                         children <-if fst tagv == 0x7FE0 && snd tagv > 0 && vlv == 0xFFFFFFFF
+                                        then  decodePixelData fword32
+                                        else return []
+                         return  (Element tagv (toVR vrv) vlv rw:children)
 
-        Explicit -> do
-                   vrv       <- getByteString 2
-                   vlv <- if vrv `elem` ["OW","OB","OF","OD","SQ","UC","UR","UT","UN"]
-                            then do
-                                 _ <- fword16
-                                 fword32
-                            else do
-                                 l <- fword16
-                                 return (fromIntegral l)
-                   rw <- if vlv == 0 || vlv == 0xFFFFFFFF || vrv == "SQ" || vrv == "OB"
-                           then return BS.empty
-                           else getByteString (fromIntegral vlv)
-                   return  [Element tagv (toVR vrv) vlv rw]
+              Explicit -> do
+                         vrv       <- getByteString 2
+                         vlv <- if vrv `elem` ["OW","OB","OF","OD","SQ","UC","UR","UT","UN"]
+                                  then do
+                                       _ <- fword16
+                                       fword32
+                                  else do
+                                       l <- fword16
+                                       return (fromIntegral l)
+                         traceM $ "vr: " ++ show vrv ++  " len: " ++ show vlv
+                         rw <- if vlv == 0 || vlv == 0xFFFFFFFF || vrv == "SQ"
+                                 then return BS.empty
+                                 else getByteString (fromIntegral vlv)
+                         children <- if fst tagv == 0x7FE0 && snd tagv > 0  && vlv ==0xFFFFFFFF
+                                         then  decodePixelData fword32
+                                         else  return []
+                         return  (Element tagv (toVR vrv) vlv rw:children)
+
+decodePixelData::Get Word32 -> Get [DataElement]
+decodePixelData fword32  = do
+  tagv <- getTag getWord16le
+--  traceM $ "decode PixelData: " ++ showHex (fst tagv) "" ++ " " ++ showHex (snd tagv) ""
+  vlv <- fword32
+  rw <- if vlv == 0 || vlv == 0xFFFFFFFF
+          then return BS.empty
+          else getByteString (fromIntegral vlv)
+  case tagv of
+    (0xFFFE,0xE0DD) -> return [Item tagv vlv rw]
+    _               -> do
+                         children <- decodePixelData fword32
+                         return (Item tagv vlv rw:children)
 
 -- | Lookup the VR by the element tag.  An error is thrown if the tag is not found in the dictionary
 lookupVRByTag:: DicomDictionary->(Word16,Word16) -> Get BS.ByteString
@@ -166,13 +160,9 @@ lookupVRByTag dict tagv = do
 -- | Decode an item in a nested element
 decodeItem :: Get Word32->(Word16,Word16)-> Get [DataElement]
 decodeItem fendian tagv = do
-  traceM $ "item tag: " ++ show tagv
+--  traceM $ "item tag: " ++ showHex  (fst tagv) "" ++ " " ++ showHex (snd tagv ) ""
   vlv  <- fendian
---  rw <- if vlv == 0 || vlv == 0xFFFFFFFF
---           then return BS.empty
---           else getByteString (fromIntegral vlv)
-
-  return  [Item tagv  vlv BS.empty] --rw
+  return  [Item tagv vlv BS.empty] --rw
 
 -- | The tag tuple parser
 getTag :: Get Word16 -> Get (Word16,Word16)
@@ -189,18 +179,6 @@ decodeElements dict ts = do elementLists <- untilM  (decodeElement dict ts) isEm
 decodeHeaderElements ::Get [DataElement]
 decodeHeaderElements = untilM decodeHeaderElement isEmpty
 
-{-
--- | Parser for decoding elements
-decodeElements'::DicomDictionary -> TransferSyntax -> Get [DataElement]
-decodeElements' dict ts = do
-  empty <- isEmpty
-  if empty
-     then return []
-     else do element  <- decodeElement dict ts
-             elements <- decodeElements dict ts
-             return (element:elements)
-
--}
 getDicomValue::TransferSyntax -> DataElement -> DicomValue a
 getDicomValue ts d =
   let fword32  =
