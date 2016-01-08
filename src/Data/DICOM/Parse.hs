@@ -20,6 +20,7 @@ import           Data.Char
 import           Data.DICOM.Dictionary
 import           Data.DICOM.Model
 import           Data.Int
+import           Data.Maybe
 import qualified Data.Text             as T
 import qualified Data.Text.Encoding    as E
 import           Debug.Trace
@@ -51,12 +52,13 @@ getTransferSyntax uiddict header  =
         rawUID  _         = BS.empty
         tsUID = lookupUIDType uiddict (rawUID $ getDicomValue defaultTransferSyntax tsElement)
 
-    in case tsUID of
-        ImplicitVRLittleEndian         -> TransferSyntax LittleEndian Implicit tsUID
-        ExplicitVRLittleEndian         -> TransferSyntax LittleEndian Explicit tsUID
-        DeflatedExplicitVRLittleEndian -> TransferSyntax LittleEndian Explicit tsUID
-        ExplicitVRBigEndian            -> TransferSyntax BigEndian    Explicit tsUID
-        _                              -> TransferSyntax LittleEndian Explicit tsUID
+    in case  tsUID of
+        Just ImplicitVRLittleEndian         -> TransferSyntax LittleEndian Implicit ImplicitVRLittleEndian
+        Just ExplicitVRLittleEndian         -> TransferSyntax LittleEndian Explicit ExplicitVRLittleEndian
+        Just DeflatedExplicitVRLittleEndian -> TransferSyntax LittleEndian Explicit DeflatedExplicitVRLittleEndian
+        Just ExplicitVRBigEndian            -> TransferSyntax BigEndian    Explicit ExplicitVRBigEndian
+        Just t                              -> TransferSyntax LittleEndian Explicit t
+        Nothing                             -> TransferSyntax LittleEndian Explicit ExplicitVRLittleEndian
     where filterby e  = deTag e  == (0x0002,0x0010)
 
 deserializeHeader:: Get ([DataElement],Int64)
@@ -190,3 +192,4 @@ getDicomValue ts d =
          UL -> ULVal (runGet fword32 (BL.fromStrict $ deRawValue d))
          UI -> UIVal ((T.dropAround isControl .E.decodeUtf8) (deRawValue d))
          _  -> RawVal (deRawValue d)
+
