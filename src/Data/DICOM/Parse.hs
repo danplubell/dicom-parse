@@ -20,7 +20,6 @@ import           Data.Char
 import           Data.DICOM.Dictionary
 import           Data.DICOM.Model
 import           Data.Int
-import           Data.Maybe
 import qualified Data.Text             as T
 import qualified Data.Text.Encoding    as E
 import           Debug.Trace
@@ -28,20 +27,26 @@ import           Numeric
 
 defaultTransferSyntax::TransferSyntax
 defaultTransferSyntax= TransferSyntax LittleEndian Explicit ExplicitVRLittleEndian
+
 -- | Parse dicom data that is from a dicom file; including preamble, dicm file indicator, and file header meta information
 --   An error is thrown if the "DICM" indicator is missing
-parseDicomFileContent::BL.ByteString -> [DataElement]
-parseDicomFileContent bs = let dd             =  loadElementDictionary
-                               uidd           =  loadUIDDictionary
-                               headerElements = parseDicomFileHeader  bs
-                               ts             = getTransferSyntax uidd (fst headerElements)
-                           in fst headerElements `mappend` parseDicomContent dd ts (BL.drop (fromIntegral (snd headerElements)) bs)
+parseDicomFileContent::BL.ByteString -> Get (Either String [DataElement])
+parseDicomFileContent bs = do let dd             =  loadElementDictionary
+                              let uidd           =  loadUIDDictionary
+                              let headerE        =  parseDicomFileHeader  bs
+                              case headerE of
+                                Left s               -> return $  Left s
+                                Right headerElements -> do
+                                                       let ts =  getTransferSyntax uidd (fst headerElements)
+                                                       return $ Right $  fst headerElements `mappend`
+                                                                parseDicomContent dd ts (BL.drop (fromIntegral (snd headerElements)) bs)
 
 -- | Parse binary  content into a list of dicom data elements
 parseDicomContent :: DicomDictionary   -> TransferSyntax -> BL.ByteString -> [DataElement]
 parseDicomContent dicomdict ts = runGet (decodeElements dicomdict  ts)
 
-parseDicomFileHeader ::  BL.ByteString -> ([DataElement],Int64)
+-- | Parse tags of the DICOM file header
+parseDicomFileHeader ::  BL.ByteString -> Either String  ([DataElement],Int64)
 parseDicomFileHeader   = runGet deserializeHeader
 
 -- | Get the transfer syntax information from the dicom file meta information
@@ -61,7 +66,8 @@ getTransferSyntax uiddict header  =
         Nothing                             -> TransferSyntax LittleEndian Explicit ExplicitVRLittleEndian
     where filterby e  = deTag e  == (0x0002,0x0010)
 
-deserializeHeader:: Get ([DataElement],Int64)
+-- | Parser for unpacking the header elements
+deserializeHeader:: Get (Either String ([DataElement],Int64))
 deserializeHeader  = do
   _                     <- getByteString 128 -- preamble
   dicm                  <- getByteString 4   -- 'DICM'
@@ -73,10 +79,10 @@ deserializeHeader  = do
 
              let deList                =   metaLenElem: runGet decodeHeaderElements (BL.fromStrict headerBytes)
              parseByteCnt          <- bytesRead
-             return (deList,parseByteCnt)
-    _      -> error "The data doesn't appear to be from a DICOM file"
+             return $ Right (deList,parseByteCnt)
+    _      -> return $ Left "The data doesn't appear to be from a DICOM file"
 
-
+-- | Parse an individual header element
 decodeHeaderElement::Get DataElement
 decodeHeaderElement = do
   tagv <- getTag getWord16le
@@ -95,7 +101,7 @@ decodeHeaderElement = do
 
 decodeElement::DicomDictionary -> TransferSyntax -> Get [DataElement]
 decodeElement dd ts = do
-  traceM $ "TS: " ++ show ts
+--  traceM $ "TS: " ++ show ts
   let fword16 = case tsEndianType ts of
                      BigEndian    -> getWord16be
                      LittleEndian -> getWord16le
@@ -103,14 +109,14 @@ decodeElement dd ts = do
                      BigEndian    -> getWord32be
                      LittleEndian -> getWord32le
   tagv <- getTag fword16
-  traceM $ "tag: " ++ showHex (fst tagv) "" ++ " " ++ showHex (snd tagv) ""
+--  traceM $ "tag: " ++ showHex (fst tagv) "" ++ " " ++ showHex (snd tagv) ""
   case fst tagv   of
      0xFFFE -> decodeItem fword32 tagv -- decode item
      _      -> case tsVREncoding ts of
               Implicit -> do
                          vlv <- fword32
                          vrv <- lookupVRByTag dd tagv
-                         traceM $ "vr: " ++ show vrv ++  " len: " ++ show vlv
+--                         traceM $ "vr: " ++ show vrv ++  " len: " ++ show vlv
                          rw  <- if vlv == 0 || vlv == 0xFFFFFFFF || vrv == "SQ"
                                   then return BS.empty
                                   else getByteString (fromIntegral vlv)
@@ -128,7 +134,7 @@ decodeElement dd ts = do
                                   else do
                                        l <- fword16
                                        return (fromIntegral l)
-                         traceM $ "vr: " ++ show vrv ++  " len: " ++ show vlv
+--                         traceM $ "vr: " ++ show vrv ++  " len: " ++ show vlv
                          rw <- if vlv == 0 || vlv == 0xFFFFFFFF || vrv == "SQ"
                                  then return BS.empty
                                  else getByteString (fromIntegral vlv)
