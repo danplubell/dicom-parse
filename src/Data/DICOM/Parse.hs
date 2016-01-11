@@ -24,6 +24,14 @@ import qualified Data.Text             as T
 import qualified Data.Text.Encoding    as E
 import           Debug.Trace
 import           Numeric
+import           System.IO
+
+
+parseDicomFile::FilePath -> IO (Either String [DataElement] )
+parseDicomFile fp = do
+  h <- openBinaryFile fp ReadMode
+  contents <- BL.hGetContents h
+  return $ runGet (parseDicomFileContent contents) contents
 
 defaultTransferSyntax::TransferSyntax
 defaultTransferSyntax= TransferSyntax LittleEndian Explicit ExplicitVRLittleEndian
